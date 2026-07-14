@@ -50,13 +50,16 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-Useful checks:
+Useful checks (also what CI runs on every push/PR — see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)):
 
 ```bash
-npx tsc --noEmit   # typecheck
-npx eslint .        # lint
-npm run build        # production build
+npm run typecheck   # tsc --noEmit
+npm run lint          # eslint
+npm test               # unit tests (Node's built-in test runner, no extra deps)
+npm run build           # production build
 ```
+
+Unit tests cover the pure-logic modules — the sentence-aware chunker (`lib/text/chunk.ts`) and the word-index tokenizer (`lib/text/tokenize.ts`) — since those are cheap to test and easy to quietly break. The provider/orchestrator/fallback-chain code is deliberately left to integration-level verification (real network calls to unofficial third-party TTS endpoints aren't practical to unit test meaningfully).
 
 ## Deploying to Vercel
 
