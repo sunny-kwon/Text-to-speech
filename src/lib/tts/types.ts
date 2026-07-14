@@ -24,3 +24,13 @@ export interface WordTiming {
   startSec: number;
   endSec: number;
 }
+
+/**
+ * Wire format for WordTiming sent in the X-TTS-Word-Boundaries header:
+ * a bare [startSec, endSec] tuple (2 decimal places) rather than a full
+ * JSON object, to keep the header small. Shared between the encoder
+ * (app/api/tts/route.ts) and decoder (hooks/useSpeechQueue.ts) so a
+ * future change to the tuple shape has to update both call sites'
+ * shared type, not two independently-typed `[number, number]` literals.
+ */
+export type CompactWordTiming = [startSec: number, endSec: number];

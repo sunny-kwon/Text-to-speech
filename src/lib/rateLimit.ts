@@ -1,5 +1,5 @@
 import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
+import { redisClient } from './kv';
 
 export interface RateLimiter {
   check(identifier: string): Promise<boolean>;
@@ -20,12 +20,9 @@ interface RateLimiterOptions {
  * scoped to a single warm serverless instance.
  */
 export function createRateLimiter({ prefix, max, windowSeconds }: RateLimiterOptions): RateLimiter {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-  if (url && token) {
+  if (redisClient) {
     const ratelimit = new Ratelimit({
-      redis: new Redis({ url, token }),
+      redis: redisClient,
       limiter: Ratelimit.slidingWindow(max, `${windowSeconds} s`),
       analytics: false,
       prefix: `ratelimit:${prefix}`,

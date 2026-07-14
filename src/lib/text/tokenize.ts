@@ -20,13 +20,16 @@ export function tokenizeWords(text: string): TextToken[] {
   return segments.map((segment) => ({ text: segment, isWord: !/^\s/.test(segment) }));
 }
 
-/** Maps a character offset into `text` to a word index (0-based, counting
- * only word tokens) — used to translate SpeechSynthesisEvent.charIndex
- * into the same addressing scheme as edge-tts's per-word timings. */
-export function wordIndexAtCharOffset(text: string, charOffset: number): number {
+/** Same as wordIndexAtCharOffset, but takes already-tokenized text. The
+ * browser SpeechSynthesis fallback fires one `onboundary` event per
+ * spoken word over a long utterance — re-running the tokenizing regex
+ * over the whole remaining document on every single event is wasted
+ * work; callers that receive many offsets against the same text should
+ * tokenize once with `tokenizeWords` and reuse it here. */
+export function wordIndexAtCharOffsetFromTokens(tokens: TextToken[], charOffset: number): number {
   let cursor = 0;
   let wordIndex = -1;
-  for (const token of tokenizeWords(text)) {
+  for (const token of tokens) {
     if (token.isWord) {
       wordIndex++;
       if (charOffset < cursor + token.text.length) return wordIndex;
@@ -34,4 +37,11 @@ export function wordIndexAtCharOffset(text: string, charOffset: number): number 
     cursor += token.text.length;
   }
   return wordIndex;
+}
+
+/** Maps a character offset into `text` to a word index (0-based, counting
+ * only word tokens) — used to translate SpeechSynthesisEvent.charIndex
+ * into the same addressing scheme as edge-tts's per-word timings. */
+export function wordIndexAtCharOffset(text: string, charOffset: number): number {
+  return wordIndexAtCharOffsetFromTokens(tokenizeWords(text), charOffset);
 }

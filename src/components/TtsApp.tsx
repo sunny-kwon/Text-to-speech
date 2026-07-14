@@ -23,27 +23,38 @@ interface PersistedState {
   cleanupEnabled: boolean;
 }
 
+// Batches are independent requests, so fetch them concurrently (capped,
+// same pattern as useSpeechQueue's download()) instead of one at a time
+// — otherwise "Generate" latency scales linearly with document length
+// for no reason, since each batch is its own LLM round-trip.
+const CLEAN_CONCURRENCY = 3;
+
+async function cleanupBatch(batch: string): Promise<string> {
+  try {
+    const response = await fetch('/api/clean', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: batch }),
+    });
+    if (!response.ok) return batch;
+    const data = (await response.json()) as { text?: string };
+    return typeof data.text === 'string' && data.text.trim() ? data.text : batch;
+  } catch {
+    // AI cleanup is best-effort only — never block the core TTS flow.
+    return batch;
+  }
+}
+
 async function cleanupText(text: string): Promise<string> {
   const batches = chunkText(text, CLEAN_BATCH_CHARS);
-  const cleaned: string[] = [];
+  const cleaned: string[] = new Array(batches.length);
 
-  for (const batch of batches) {
-    try {
-      const response = await fetch('/api/clean', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: batch }),
-      });
-      if (!response.ok) {
-        cleaned.push(batch);
-        continue;
-      }
-      const data = (await response.json()) as { text?: string };
-      cleaned.push(typeof data.text === 'string' && data.text.trim() ? data.text : batch);
-    } catch {
-      // AI cleanup is best-effort only — never block the core TTS flow.
-      cleaned.push(batch);
-    }
+  for (let start = 0; start < batches.length; start += CLEAN_CONCURRENCY) {
+    const slice = batches.slice(start, start + CLEAN_CONCURRENCY);
+    const results = await Promise.all(slice.map(cleanupBatch));
+    results.forEach((result, offset) => {
+      cleaned[start + offset] = result;
+    });
   }
 
   return cleaned.join('\n\n');
@@ -56,6 +67,7 @@ export function TtsApp() {
   const [cleanupEnabled, setCleanupEnabled] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const { state, speak, stop, pause, resume, setRate, download, audioElRef } = useSpeechQueue();
 
@@ -129,6 +141,7 @@ export function TtsApp() {
 
   const handleDownload = useCallback(async () => {
     setIsDownloading(true);
+    setDownloadError(null);
     try {
       const blob = await download();
       if (!blob) return;
@@ -140,6 +153,11 @@ export function TtsApp() {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+    } catch {
+      // A chunk that hadn't been played/cached yet failed to fetch
+      // (network blip, provider hiccup) — without this, the button just
+      // silently reset with no explanation and no file.
+      setDownloadError('Download failed — a segment could not be fetched. Try again in a moment.');
     } finally {
       setIsDownloading(false);
     }
@@ -179,6 +197,11 @@ export function TtsApp() {
         onDownload={handleDownload}
         isDownloading={isDownloading}
       />
+      {downloadError && (
+        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {downloadError}
+        </p>
+      )}
     </div>
   );
 }

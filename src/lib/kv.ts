@@ -1,6 +1,20 @@
 import { Redis } from '@upstash/redis';
 
 /**
+ * Single shared Upstash Redis client, constructed once at module scope
+ * (null if not configured — this app must run at full capability with
+ * zero environment variables set). Both the circuit-breaker KVStore
+ * below and lib/rateLimit.ts's Ratelimit import this rather than each
+ * independently re-deriving the same "is Redis configured" check and
+ * constructing their own client instance.
+ */
+export const redisClient: Redis | null = (() => {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? new Redis({ url, token }) : null;
+})();
+
+/**
  * Minimal key-value abstraction used for the TTS provider circuit breaker.
  * Backed by Upstash Redis (shared across all serverless instances) when
  * configured, otherwise falls back to an in-memory store so the app still
@@ -42,18 +56,7 @@ class MemoryKVStore implements KVStore {
   }
 }
 
-function createKVStore(): KVStore {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (url && token) {
-    return new RedisKVStore(new Redis({ url, token }));
-  }
-  return new MemoryKVStore();
-}
-
 // Module-level singleton: reused across warm serverless invocations.
-export const kv: KVStore = createKVStore();
+export const kv: KVStore = redisClient ? new RedisKVStore(redisClient) : new MemoryKVStore();
 
-export const isRedisConfigured = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-);
+export const isRedisConfigured = redisClient !== null;

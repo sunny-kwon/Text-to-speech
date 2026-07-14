@@ -2,10 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { cleanText } from '@/lib/text/clean';
 import { createRateLimiter, getClientIp } from '@/lib/rateLimit';
+import { parseJsonBody } from '@/lib/api/parseRequest';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
+// Above the client's CLEAN_BATCH_CHARS (4000, in components/TtsApp.tsx),
+// so a slightly oversized batch still succeeds instead of hard-failing.
 const MAX_TEXT_LENGTH = 6000;
 
 const requestSchema = z.object({
@@ -15,20 +18,8 @@ const requestSchema = z.object({
 const cleanRateLimiter = createRateLimiter({ prefix: 'clean', max: 15, windowSeconds: 60 });
 
 export async function POST(request: NextRequest) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'INVALID_JSON', message: 'Request body must be valid JSON.' }, { status: 400 });
-  }
-
-  const parsed = requestSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid request.' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseJsonBody(request, requestSchema);
+  if (!parsed.ok) return parsed.response;
 
   const allowed = await cleanRateLimiter.check(getClientIp(request.headers));
   if (!allowed) {

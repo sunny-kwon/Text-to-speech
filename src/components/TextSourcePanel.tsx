@@ -23,7 +23,15 @@ export function TextSourcePanel({ text, onTextChange }: Props) {
       setIsExtracting(true);
       setExtractProgress({ done: 0, total: 0 });
       try {
-        const extracted = await extractTextFromPdf(file, (done, total) => setExtractProgress({ done, total }));
+        const extracted = await extractTextFromPdf(file, (done, total) => {
+          // Throttled: a large PDF fires this once per page, and setState
+          // on every single one forces a full re-render per page. Always
+          // show the first and last page so feedback starts immediately
+          // and the counter doesn't stall short of the true total.
+          if (done === 1 || done === total || done % 3 === 0) {
+            setExtractProgress({ done, total });
+          }
+        });
         if (!extracted.trim()) {
           setFileError('No selectable text found in this PDF (it may be scanned/image-only).');
         } else {

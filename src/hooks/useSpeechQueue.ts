@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { chunkText } from '@/lib/text/chunk';
-import { wordIndexAtCharOffset } from '@/lib/text/tokenize';
-import type { TtsProviderId, WordTiming } from '@/lib/tts/types';
+import { tokenizeWords, wordIndexAtCharOffsetFromTokens } from '@/lib/text/tokenize';
+import type { CompactWordTiming, TtsProviderId, WordTiming } from '@/lib/tts/types';
 
 export type Engine = TtsProviderId | 'browser';
 export type QueueStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'error' | 'done';
@@ -41,11 +41,35 @@ const initialState: SpeechQueueState = {
 function decodeWordBoundaries(header: string): WordTiming[] {
   try {
     const bytes = Uint8Array.from(atob(header), (c) => c.charCodeAt(0));
-    const pairs = JSON.parse(new TextDecoder().decode(bytes)) as [number, number][];
+    const pairs = JSON.parse(new TextDecoder().decode(bytes)) as CompactWordTiming[];
     return pairs.map(([startSec, endSec]) => ({ startSec, endSec }));
   } catch {
     return [];
   }
+}
+
+/** Thrown by fetchChunkAudio on a non-OK response, carrying the server's
+ * error code (e.g. 'ALL_PROVIDERS_DOWN', 'RATE_LIMITED') so callers can
+ * distinguish "both TTS providers are genuinely down" — the only case
+ * that should trigger a permanent downgrade to the browser voice — from
+ * a transient/retryable failure like a rate limit or network blip. */
+class TtsRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string | undefined,
+  ) {
+    super(message);
+    this.name = 'TtsRequestError';
+  }
+}
+
+function cancelBrowserSpeech(): void {
+  if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
+}
+
+function getMediaSession(): MediaSession | null {
+  if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return null;
+  return navigator.mediaSession;
 }
 
 export function useSpeechQueue() {
@@ -66,6 +90,12 @@ export function useSpeechQueue() {
   const rateRef = useRef(1);
   const stopRequestedRef = useRef(false);
   const browserModeRef = useRef(false);
+  // Bumped on every speak() call. In-flight requests from a previous
+  // session (e.g. a prefetch that was still pending when the user
+  // edited the text and regenerated) check this before writing into the
+  // new session's caches, so a stale response can't silently overwrite
+  // fresh chunk data with audio for text that's no longer current.
+  const sessionIdRef = useRef(0);
 
   // "Latest" ref: pause/resume/stop/playChunk are plain functions
   // redefined every render (see note below), so the Media Session action
@@ -125,7 +155,7 @@ export function useSpeechQueue() {
     return () => {
       stopRequestedRef.current = true;
       audio?.pause();
-      if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
+      cancelBrowserSpeech();
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
@@ -137,8 +167,8 @@ export function useSpeechQueue() {
   // of server-generated audio — the browser-voice fallback reads the
   // rest of the document as a single utterance with no chunk boundaries.
   useEffect(() => {
-    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
-    const session = navigator.mediaSession;
+    const session = getMediaSession();
+    if (!session) return;
     session.setActionHandler('play', () => latestRef.current.resume());
     session.setActionHandler('pause', () => latestRef.current.pause());
     session.setActionHandler('stop', () => latestRef.current.stop());
@@ -166,11 +196,11 @@ export function useSpeechQueue() {
   // the title, so background/locked playback is identifiable and
   // controllable without switching back to the tab.
   useEffect(() => {
-    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
-    navigator.mediaSession.playbackState =
-      state.status === 'playing' ? 'playing' : state.status === 'paused' ? 'paused' : 'none';
+    const session = getMediaSession();
+    if (!session) return;
+    session.playbackState = state.status === 'playing' ? 'playing' : state.status === 'paused' ? 'paused' : 'none';
     if (typeof MediaMetadata !== 'undefined') {
-      navigator.mediaSession.metadata = state.currentChunkText
+      session.metadata = state.currentChunkText
         ? new MediaMetadata({ title: state.currentChunkText.slice(0, 100), artist: 'Text to Speech' })
         : null;
     }
@@ -182,6 +212,7 @@ export function useSpeechQueue() {
   // buys nothing but adds self-referential-recursion complexity.
 
   async function fetchChunkAudio(index: number): Promise<Blob> {
+    const sessionId = sessionIdRef.current;
     const response = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -194,11 +225,25 @@ export function useSpeechQueue() {
 
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
-      throw new Error(payload?.message ?? `Speech request failed (${response.status})`);
+      throw new TtsRequestError(payload?.message ?? `Speech request failed (${response.status})`, payload?.error);
+    }
+
+    // A new speak() call landed while this request was in flight (e.g.
+    // the user edited the text and regenerated before a prefetch
+    // resolved) — don't let a stale response for the old text write
+    // into the new session's chunk caches.
+    if (sessionId !== sessionIdRef.current) {
+      throw new TtsRequestError('Stale request from a previous session.', 'STALE_SESSION');
     }
 
     const provider = response.headers.get('X-TTS-Provider') as TtsProviderId | null;
-    if (provider) forcedProviderRef.current = provider;
+    // First-write-wins: once a provider is chosen for this document (its
+    // first successfully-fetched chunk), later chunks keep requesting it
+    // so the voice stays consistent even if the provider recovers/flaps
+    // mid-document. Without this guard, out-of-order responses from
+    // concurrent prefetch/download requests could otherwise clobber the
+    // committed choice with whichever happened to resolve last.
+    if (provider && forcedProviderRef.current === undefined) forcedProviderRef.current = provider;
 
     const boundaryHeader = response.headers.get('X-TTS-Word-Boundaries');
     boundariesRef.current[index] = boundaryHeader ? decodeWordBoundaries(boundaryHeader) : [];
@@ -213,6 +258,11 @@ export function useSpeechQueue() {
     }
     browserModeRef.current = true;
     const remainingText = chunksRef.current.slice(fromIndex).join(' ');
+    // Tokenized once up front rather than inside onboundary: that handler
+    // fires once per spoken word over the whole rest of the document, and
+    // re-running the tokenizing regex over the full remaining text on
+    // every single event is wasted work that scales with document length.
+    const remainingTokens = tokenizeWords(remainingText);
     const utterance = new SpeechSynthesisUtterance(remainingText);
     utterance.rate = rateRef.current;
     // Word-highlighting in this fallback tier depends on the browser
@@ -221,12 +271,22 @@ export function useSpeechQueue() {
     // null and the transcript renders without a highlight.
     utterance.onboundary = (event) => {
       if (event.name && event.name !== 'word') return;
-      const idx = wordIndexAtCharOffset(remainingText, event.charIndex);
+      const idx = wordIndexAtCharOffsetFromTokens(remainingTokens, event.charIndex);
       setState((s) => (s.activeWordIndex === idx ? s : { ...s, activeWordIndex: idx }));
     };
-    utterance.onend = () => setState((s) => ({ ...s, status: 'done', activeWordIndex: null }));
-    utterance.onerror = () =>
+    // stop() sets stopRequestedRef before cancelling synthesis, so these
+    // guards tell an explicit user-requested stop apart from the
+    // utterance naturally finishing or erroring — without them, cancel()
+    // asynchronously firing onerror ('canceled') would overwrite the
+    // 'idle' status stop() just set with a spurious error message.
+    utterance.onend = () => {
+      if (stopRequestedRef.current) return;
+      setState((s) => ({ ...s, status: 'done', activeWordIndex: null }));
+    };
+    utterance.onerror = () => {
+      if (stopRequestedRef.current) return;
       setState((s) => ({ ...s, status: 'error', errorMessage: 'Browser speech playback failed.' }));
+    };
 
     window.speechSynthesis.cancel();
     setState((s) => ({
@@ -253,11 +313,24 @@ export function useSpeechQueue() {
       try {
         blob = await fetchChunkAudio(index);
         blobsRef.current[index] = blob;
-      } catch {
-        // Both server-side providers are down (or unreachable) for this
-        // chunk: drop to the browser's built-in voice for the rest of
-        // the document rather than stalling or erroring out.
-        speakWithBrowser(index);
+      } catch (err) {
+        if (stopRequestedRef.current) return;
+        // Only a genuine "both server-side providers are down" response
+        // permanently drops the rest of the document to the browser's
+        // built-in voice. Anything else — a rate limit, a stale-session
+        // guard, a network blip — is transient/retryable and shouldn't
+        // silently and irreversibly downgrade quality for the rest of
+        // playback; surface it as a normal error instead so the user can
+        // decide to retry rather than being auto-switched to a lower tier.
+        if (err instanceof TtsRequestError && err.code === 'ALL_PROVIDERS_DOWN') {
+          speakWithBrowser(index);
+        } else {
+          setState((s) => ({
+            ...s,
+            status: 'error',
+            errorMessage: err instanceof Error ? err.message : 'Speech request failed.',
+          }));
+        }
         return;
       }
     }
@@ -268,6 +341,13 @@ export function useSpeechQueue() {
       setState((s) => ({ ...s, status: 'error', errorMessage: 'Audio player is not ready yet — try again.' }));
       return;
     }
+
+    // A previous play of this same chunk (e.g. the user stepped back via
+    // the lock-screen "previous track" control and is now replaying it)
+    // already minted an object URL for this slot — revoke it before
+    // overwriting, or it leaks for the rest of the tab's lifetime.
+    const previousUrl = objectUrlsRef.current[index];
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
 
     const url = URL.createObjectURL(blob);
     objectUrlsRef.current[index] = url;
@@ -280,7 +360,12 @@ export function useSpeechQueue() {
     setState((s) => ({
       ...s,
       status: 'playing',
-      engine: forcedProviderRef.current ?? s.engine ?? 'edge-tts',
+      // forcedProviderRef is always populated by now (fetchChunkAudio
+      // just succeeded above), so `s.engine` only matters as a defensive
+      // fallback — no need to hardcode an assumption about which tier is
+      // "the" default, since that's the orchestrator's decision, not
+      // this hook's.
+      engine: forcedProviderRef.current ?? s.engine,
       currentChunkText: chunksRef.current[index] ?? '',
       activeWordIndex: null,
     }));
@@ -307,11 +392,17 @@ export function useSpeechQueue() {
   }
 
   function speak(text: string, voiceId: string, rate = 1) {
+    sessionIdRef.current += 1;
     stopRequestedRef.current = false;
     browserModeRef.current = false;
     forcedProviderRef.current = undefined;
     voiceIdRef.current = voiceId;
     rateRef.current = rate;
+    // If a previous browser-fallback utterance is still talking (e.g.
+    // the user edited the text and hit Generate again without pressing
+    // Stop first), cancel it — otherwise the old utterance keeps reading
+    // while the newly generated server audio starts playing on top of it.
+    cancelBrowserSpeech();
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrlsRef.current = [];
     blobsRef.current = [];
@@ -340,7 +431,7 @@ export function useSpeechQueue() {
   function stop() {
     stopRequestedRef.current = true;
     audioRef.current?.pause();
-    if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
+    cancelBrowserSpeech();
     setState((s) => ({ ...s, status: 'idle', activeWordIndex: null }));
   }
 

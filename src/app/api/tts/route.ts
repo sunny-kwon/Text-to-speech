@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { AllProvidersDownError, synthesizeSpeech } from '@/lib/tts/orchestrator';
 import { getVoiceProfile } from '@/lib/tts/voices';
 import { createRateLimiter, getClientIp } from '@/lib/rateLimit';
-import type { TtsProviderId, WordTiming } from '@/lib/tts/types';
+import { parseJsonBody } from '@/lib/api/parseRequest';
+import type { CompactWordTiming, TtsProviderId, WordTiming } from '@/lib/tts/types';
 
 // Needs the Node.js runtime (edge-tts uses a WebSocket connection under
 // the hood, which isn't available in the Edge runtime).
@@ -12,8 +13,11 @@ export const runtime = 'nodejs';
 // retry, while staying inside Vercel Hobby's 60s configurable ceiling.
 export const maxDuration = 30;
 
-// A little above the client's ~600-char chunk target, so a slightly
-// oversized chunk still succeeds instead of hard-failing at the edge.
+// A little above the client's ~600-char chunk target (CHUNK_TARGET_CHARS
+// in hooks/useSpeechQueue.ts, hard-capped there at 1.4x = 840), so a
+// slightly oversized chunk still succeeds instead of hard-failing at the
+// edge. Keep this comfortably above that hard cap if either constant
+// changes — a smaller margin risks legitimate chunks getting rejected.
 const MAX_TEXT_LENGTH = 1200;
 
 const requestSchema = z.object({
@@ -37,26 +41,14 @@ const MAX_BOUNDARY_HEADER_LENGTH = 6000;
 function encodeWordBoundaries(wordBoundaries: WordTiming[]): string | null {
   if (!wordBoundaries.length) return null;
   const round2 = (n: number) => Math.round(n * 100) / 100;
-  const compact = wordBoundaries.map((w) => [round2(w.startSec), round2(w.endSec)]);
+  const compact: CompactWordTiming[] = wordBoundaries.map((w) => [round2(w.startSec), round2(w.endSec)]);
   const encoded = Buffer.from(JSON.stringify(compact), 'utf-8').toString('base64');
   return encoded.length <= MAX_BOUNDARY_HEADER_LENGTH ? encoded : null;
 }
 
 export async function POST(request: NextRequest) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'INVALID_JSON', message: 'Request body must be valid JSON.' }, { status: 400 });
-  }
-
-  const parsed = requestSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid request.' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseJsonBody(request, requestSchema);
+  if (!parsed.ok) return parsed.response;
 
   const allowed = await ttsRateLimiter.check(getClientIp(request.headers));
   if (!allowed) {

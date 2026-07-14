@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tokenizeWords, wordIndexAtCharOffset } from './tokenize.ts';
+import { tokenizeWords, wordIndexAtCharOffset, wordIndexAtCharOffsetFromTokens } from './tokenize.ts';
 
 test('tokenizeWords: reconstructing all tokens reproduces the original text exactly', () => {
   const text = 'Hello  world, this is  a test.\nSecond line.';
@@ -43,4 +43,12 @@ test('wordIndexAtCharOffset: offset past the end resolves to the last word', () 
 
 test('wordIndexAtCharOffset: empty text resolves to -1 (no words)', () => {
   assert.equal(wordIndexAtCharOffset('', 0), -1);
+});
+
+test('wordIndexAtCharOffsetFromTokens: matches wordIndexAtCharOffset for the same text/offsets', () => {
+  const text = 'Hello  world, this is  a test.';
+  const tokens = tokenizeWords(text);
+  for (let charIndex = 0; charIndex < text.length; charIndex++) {
+    assert.equal(wordIndexAtCharOffsetFromTokens(tokens, charIndex), wordIndexAtCharOffset(text, charIndex));
+  }
 });

@@ -19,20 +19,25 @@ export async function extractTextFromPdf(
   const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
   const pdf = await loadingTask.promise;
 
-  const pageTexts: string[] = [];
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item) => ('str' in item ? item.str : ''))
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    pageTexts.push(pageText);
-    onProgress?.(pageNumber, pdf.numPages);
-    page.cleanup();
+  try {
+    const pageTexts: string[] = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const pageText = content.items
+        .map((item) => ('str' in item ? item.str : ''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      pageTexts.push(pageText);
+      onProgress?.(pageNumber, pdf.numPages);
+      page.cleanup();
+    }
+    return pageTexts.filter(Boolean).join('\n\n');
+  } finally {
+    // Must run even if a page throws (e.g. one malformed page in an
+    // otherwise valid PDF) — otherwise the pdf.js document/worker for
+    // this load is never released.
+    await loadingTask.destroy();
   }
-
-  await loadingTask.destroy();
-  return pageTexts.filter(Boolean).join('\n\n');
 }

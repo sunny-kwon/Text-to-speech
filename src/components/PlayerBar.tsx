@@ -31,9 +31,17 @@ export function PlayerBar({
   const isPlaying = state.status === 'playing';
   const isPaused = state.status === 'paused';
   const isBusy = state.status === 'loading';
-  const isActive = isPlaying || isPaused;
   const isBrowserEngine = state.engine === 'browser';
   const canDownload = state.engine !== null && !isBrowserEngine && state.status !== 'error';
+  // Non-empty exactly once a chunk's audio has actually loaded (set right
+  // before audio.src is assigned in playChunk) — a more precise signal
+  // than playback status for "is there something for the native player
+  // to show," since it correctly stays hidden if the very first chunk
+  // fails before anything ever loaded, but stays visible through an
+  // error on a later chunk (e.g. autoplay blocked) so the native play
+  // button — which the error message tells the user to press — is
+  // actually there to press.
+  const hasLoadedAudio = !isBrowserEngine && state.currentChunkText !== '';
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -48,7 +56,7 @@ export function PlayerBar({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!isActive && (
+          {!isPlaying && !isPaused && (
             <button
               type="button"
               onClick={onGenerate}
@@ -79,7 +87,7 @@ export function PlayerBar({
               ▶ Resume
             </button>
           )}
-          {isActive && (
+          {(isPlaying || isPaused) && (
             <button
               type="button"
               onClick={onStop}
@@ -103,11 +111,7 @@ export function PlayerBar({
       {/* Always mounted so the ref is attached before playback can start;
           hidden (not unmounted) while there's nothing playable yet, or
           while in the browser-voice fallback which has no media source. */}
-      <audio
-        ref={audioElRef}
-        controls
-        className={!isBrowserEngine && (isActive || isBusy) ? 'w-full' : 'hidden'}
-      />
+      <audio ref={audioElRef} controls className={hasLoadedAudio ? 'w-full' : 'hidden'} />
 
       <TranscriptView text={state.currentChunkText} activeWordIndex={state.activeWordIndex} />
 
