@@ -80,8 +80,11 @@ export async function cleanText(text: string): Promise<{ text: string; cleanedBy
     try {
       const cleaned = await run();
       return { text: cleaned, cleanedBy: name };
-    } catch {
-      continue;
+    } catch (err) {
+      // Visible in Vercel's (free) function logs. Cleanup is optional and
+      // must never throw to the caller, but silently swallowing every
+      // failure would make a misconfigured/expired key invisible.
+      console.error(`[clean] ${name} cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

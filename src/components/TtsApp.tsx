@@ -46,7 +46,7 @@ export function TtsApp() {
   const [isCleaning, setIsCleaning] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
 
-  const { state, speak, stop, pause, resume, setRate, download } = useSpeechQueue();
+  const { state, speak, stop, pause, resume, setRate, download, audioElRef } = useSpeechQueue();
 
   const handleGenerate = useCallback(async () => {
     if (!text.trim()) return;
@@ -114,6 +114,7 @@ export function TtsApp() {
 
       <PlayerBar
         state={state}
+        audioElRef={audioElRef}
         disabled={!text.trim() || isCleaning}
         onGenerate={handleGenerate}
         onPause={pause}

@@ -1,13 +1,5 @@
 'use client';
 
-/* eslint-disable react-hooks/immutability --
- * This hook imperatively drives a single HTMLAudioElement (play/pause/src
- * swaps across chunk boundaries) via a ref, which the unmount-cleanup
- * effect also reads. That's a standard, correct pattern for imperative
- * media control — the React Compiler-oriented "immutability" rule flags
- * it because it doesn't yet model that pattern, not because it's unsafe.
- * This project doesn't opt into React Compiler. */
-
 import { useEffect, useRef, useState } from 'react';
 import { chunkText } from '@/lib/text/chunk';
 import type { TtsProviderId } from '@/lib/tts/types';
@@ -37,6 +29,11 @@ const initialState: SpeechQueueState = {
 export function useSpeechQueue() {
   const [state, setState] = useState<SpeechQueueState>(initialState);
 
+  // Attached to a real <audio controls> element rendered by the
+  // consumer (not created via `new Audio()`), so the browser's native
+  // scrubber/volume/time UI drives the same element our chunk-queue
+  // logic controls. The element is always mounted (just hidden while
+  // unused), so this ref is populated before any playback can start.
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const chunksRef = useRef<string[]>([]);
   const blobsRef = useRef<(Blob | null)[]>([]);
@@ -47,12 +44,29 @@ export function useSpeechQueue() {
   const stopRequestedRef = useRef(false);
   const browserModeRef = useRef(false);
 
+  // Keeps `state.status` in sync when the user drives playback directly
+  // via the native <audio> controls (e.g. clicking its own pause button)
+  // instead of through our pause()/resume() functions.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onPlay = () => setState((s) => (s.status === 'error' ? s : { ...s, status: 'playing' }));
+    const onPause = () => setState((s) => (s.status === 'idle' || s.status === 'error' ? s : { ...s, status: 'paused' }));
+    audio.addEventListener('play', onPlay);
+    audio.addEventListener('pause', onPause);
+    return () => {
+      audio.removeEventListener('play', onPlay);
+      audio.removeEventListener('pause', onPause);
+    };
+  }, []);
+
   // Unmount cleanup only ever touches refs, so it's the sole thing kept
   // inside an actual effect.
   useEffect(() => {
+    const audio = audioRef.current;
     return () => {
       stopRequestedRef.current = true;
-      audioRef.current?.pause();
+      audio?.pause();
       if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
@@ -126,10 +140,14 @@ export function useSpeechQueue() {
     }
     if (stopRequestedRef.current) return;
 
+    const audio = audioRef.current;
+    if (!audio) {
+      setState((s) => ({ ...s, status: 'error', errorMessage: 'Audio player is not ready yet — try again.' }));
+      return;
+    }
+
     const url = URL.createObjectURL(blob);
     objectUrlsRef.current[index] = url;
-    const audio = audioRef.current ?? new Audio();
-    audioRef.current = audio;
     audio.src = url;
     audio.playbackRate = rateRef.current;
     audio.onended = () => {
@@ -218,5 +236,5 @@ export function useSpeechQueue() {
     return new Blob(blobsRef.current as Blob[], { type: 'audio/mpeg' });
   }
 
-  return { state, speak, stop, pause, resume, setRate, download };
+  return { state, speak, stop, pause, resume, setRate, download, audioElRef: audioRef };
 }

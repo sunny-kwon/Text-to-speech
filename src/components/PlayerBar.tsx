@@ -1,10 +1,12 @@
 'use client';
 
+import type { RefObject } from 'react';
 import type { SpeechQueueState } from '@/hooks/useSpeechQueue';
 import { EngineBadge } from './EngineBadge';
 
 interface Props {
   state: SpeechQueueState;
+  audioElRef: RefObject<HTMLAudioElement | null>;
   disabled: boolean;
   onGenerate: () => void;
   onPause: () => void;
@@ -14,11 +16,23 @@ interface Props {
   isDownloading: boolean;
 }
 
-export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onStop, onDownload, isDownloading }: Props) {
+export function PlayerBar({
+  state,
+  audioElRef,
+  disabled,
+  onGenerate,
+  onPause,
+  onResume,
+  onStop,
+  onDownload,
+  isDownloading,
+}: Props) {
   const isPlaying = state.status === 'playing';
   const isPaused = state.status === 'paused';
   const isBusy = state.status === 'loading';
-  const canDownload = state.engine !== null && state.engine !== 'browser' && state.status !== 'error';
+  const isActive = isPlaying || isPaused;
+  const isBrowserEngine = state.engine === 'browser';
+  const canDownload = state.engine !== null && !isBrowserEngine && state.status !== 'error';
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -33,7 +47,7 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!isPlaying && !isPaused && (
+          {!isActive && (
             <button
               type="button"
               onClick={onGenerate}
@@ -43,7 +57,10 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
               {isBusy ? 'Loading…' : '▶ Generate & Play'}
             </button>
           )}
-          {isPlaying && (
+
+          {/* Browser-voice fallback has no media element to attach native
+              controls to, so it keeps the custom pause/resume/stop. */}
+          {isBrowserEngine && isPlaying && (
             <button
               type="button"
               onClick={onPause}
@@ -52,7 +69,7 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
               ⏸ Pause
             </button>
           )}
-          {isPaused && (
+          {isBrowserEngine && isPaused && (
             <button
               type="button"
               onClick={onResume}
@@ -61,7 +78,7 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
               ▶ Resume
             </button>
           )}
-          {(isPlaying || isPaused) && (
+          {isActive && (
             <button
               type="button"
               onClick={onStop}
@@ -74,7 +91,7 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
             type="button"
             onClick={onDownload}
             disabled={!canDownload || isDownloading}
-            title={state.engine === 'browser' ? "Download isn't available while using the browser voice fallback" : undefined}
+            title={isBrowserEngine ? "Download isn't available while using the browser voice fallback" : undefined}
             className="rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             {isDownloading ? 'Preparing…' : '⬇ Download MP3'}
@@ -82,12 +99,21 @@ export function PlayerBar({ state, disabled, onGenerate, onPause, onResume, onSt
         </div>
       </div>
 
+      {/* Always mounted so the ref is attached before playback can start;
+          hidden (not unmounted) while there's nothing playable yet, or
+          while in the browser-voice fallback which has no media source. */}
+      <audio
+        ref={audioElRef}
+        controls
+        className={!isBrowserEngine && (isActive || isBusy) ? 'w-full' : 'hidden'}
+      />
+
       {state.status === 'error' && state.errorMessage && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">
           {state.errorMessage}
         </p>
       )}
-      {state.engine === 'browser' && state.status !== 'error' && (
+      {isBrowserEngine && state.status !== 'error' && (
         <p className="text-sm text-amber-700 dark:text-amber-400">
           Server voices are temporarily unavailable — reading with your browser&apos;s built-in voice instead. Download
           isn&apos;t available in this mode.

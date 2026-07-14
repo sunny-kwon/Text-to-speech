@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import { extractTextFromPdf } from '@/lib/pdf/extract';
 
 type Tab = 'paste' | 'pdf' | 'txt';
@@ -72,6 +72,13 @@ export function TextSourcePanel({ text, onTextChange }: Props) {
     [handleFiles],
   );
 
+  const onDropzoneKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      fileInputRef.current?.click();
+    }
+  }, []);
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-900" role="tablist">
@@ -108,9 +115,11 @@ export function TextSourcePanel({ text, onTextChange }: Props) {
           onDrop={onDrop}
           onDragOver={(event) => event.preventDefault()}
           onClick={() => fileInputRef.current?.click()}
+          onKeyDown={onDropzoneKeyDown}
           role="button"
           tabIndex={0}
-          className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-300 bg-zinc-50 p-10 text-center text-sm text-zinc-500 transition-colors hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400"
+          aria-label={`Choose a ${tab === 'pdf' ? 'PDF' : 'text'} file, or drag and drop one here`}
+          className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-300 bg-zinc-50 p-10 text-center text-sm text-zinc-500 outline-offset-2 transition-colors hover:border-zinc-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400"
         >
           <input
             ref={fileInputRef}

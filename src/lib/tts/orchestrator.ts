@@ -63,7 +63,12 @@ export async function synthesizeSpeech(
       if (!audio || audio.length === 0) throw new Error('empty audio buffer');
       return { audio, provider: providerId };
     } catch (err) {
-      failures.push(`${providerId}: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${providerId}: ${message}`);
+      // Visible in Vercel's (free) function logs — without this, a
+      // provider silently degrading to the next tier would be invisible
+      // until every tier failed.
+      console.error(`[tts] provider "${providerId}" failed, opening circuit breaker: ${message}`);
       await markProviderDown(providerId);
     }
   }
