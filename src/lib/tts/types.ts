@@ -12,3 +12,15 @@ export interface VoiceProfile {
   googleLang: string;
   gender: 'Female' | 'Male';
 }
+
+/**
+ * One spoken word's timing within a chunk's audio, in seconds. Word
+ * index in the array is expected to line up with the index-th
+ * whitespace-delimited token in that chunk's text (see
+ * lib/text/tokenize.ts) — only edge-tts provides this; other tiers
+ * return an empty array.
+ */
+export interface WordTiming {
+  startSec: number;
+  endSec: number;
+}

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { AllProvidersDownError, synthesizeSpeech } from '@/lib/tts/orchestrator';
 import { getVoiceProfile } from '@/lib/tts/voices';
 import { createRateLimiter, getClientIp } from '@/lib/rateLimit';
-import type { TtsProviderId } from '@/lib/tts/types';
+import type { TtsProviderId, WordTiming } from '@/lib/tts/types';
 
 // Needs the Node.js runtime (edge-tts uses a WebSocket connection under
 // the hood, which isn't available in the Edge runtime).
@@ -23,6 +23,24 @@ const requestSchema = z.object({
 });
 
 const ttsRateLimiter = createRateLimiter({ prefix: 'tts', max: 30, windowSeconds: 60 });
+
+// Defensive cap on the word-boundary header. Highlighting is a nice-to-have
+// enhancement layered on top of the audio response and must never be able
+// to break audio delivery, so if a pathological chunk somehow produces an
+// oversized payload, we just drop the header instead of risking the
+// response failing.
+const MAX_BOUNDARY_HEADER_LENGTH = 6000;
+
+/** Encodes word timings as compact [startSec, endSec] pairs (2dp) rather
+ * than full JSON objects, then base64s the UTF-8 bytes for safe header
+ * transport. Returns null if empty or unexpectedly large. */
+function encodeWordBoundaries(wordBoundaries: WordTiming[]): string | null {
+  if (!wordBoundaries.length) return null;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const compact = wordBoundaries.map((w) => [round2(w.startSec), round2(w.endSec)]);
+  const encoded = Buffer.from(JSON.stringify(compact), 'utf-8').toString('base64');
+  return encoded.length <= MAX_BOUNDARY_HEADER_LENGTH ? encoded : null;
+}
 
 export async function POST(request: NextRequest) {
   let body: unknown;
@@ -52,15 +70,21 @@ export async function POST(request: NextRequest) {
   const voice = getVoiceProfile(voiceId);
 
   try {
-    const { audio, provider: usedProvider } = await synthesizeSpeech(text, voice, provider as TtsProviderId | undefined);
-    return new NextResponse(new Uint8Array(audio), {
-      status: 200,
-      headers: {
-        'Content-Type': 'audio/mpeg',
-        'Cache-Control': 'no-store',
-        'X-TTS-Provider': usedProvider,
-      },
-    });
+    const { audio, provider: usedProvider, wordBoundaries } = await synthesizeSpeech(
+      text,
+      voice,
+      provider as TtsProviderId | undefined,
+    );
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'no-store',
+      'X-TTS-Provider': usedProvider,
+    };
+    const encodedBoundaries = encodeWordBoundaries(wordBoundaries);
+    if (encodedBoundaries) headers['X-TTS-Word-Boundaries'] = encodedBoundaries;
+
+    return new NextResponse(new Uint8Array(audio), { status: 200, headers });
   } catch (err) {
     if (err instanceof AllProvidersDownError) {
       return NextResponse.json(

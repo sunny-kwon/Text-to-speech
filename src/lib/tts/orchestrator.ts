@@ -1,13 +1,17 @@
 import { isProviderDown, markProviderDown } from './circuitBreaker';
 import { synthesizeWithEdgeTts } from './providers/edgeTts';
 import { synthesizeWithGoogleTts } from './providers/googleTts';
-import type { TtsProviderId, VoiceProfile } from './types';
+import type { TtsProviderId, VoiceProfile, WordTiming } from './types';
 
 const PROVIDER_ORDER: TtsProviderId[] = ['edge-tts', 'google-tts'];
 const RETRY_BACKOFF_MS = 300;
 
-export interface SynthesizeResult {
+interface ProviderCallResult {
   audio: Buffer;
+  wordBoundaries: WordTiming[];
+}
+
+export interface SynthesizeResult extends ProviderCallResult {
   provider: TtsProviderId;
 }
 
@@ -18,14 +22,14 @@ export class AllProvidersDownError extends Error {
   }
 }
 
-async function callProvider(id: TtsProviderId, text: string, voice: VoiceProfile): Promise<Buffer> {
+async function callProvider(id: TtsProviderId, text: string, voice: VoiceProfile): Promise<ProviderCallResult> {
   if (id === 'edge-tts') return synthesizeWithEdgeTts(text, voice.edgeVoice);
   return synthesizeWithGoogleTts(text, voice.googleLang);
 }
 
 /** One retry with a short backoff before a provider is considered down —
  * absorbs transient network blips without tripping the circuit breaker. */
-async function attemptWithRetry(id: TtsProviderId, text: string, voice: VoiceProfile): Promise<Buffer> {
+async function attemptWithRetry(id: TtsProviderId, text: string, voice: VoiceProfile): Promise<ProviderCallResult> {
   try {
     return await callProvider(id, text, voice);
   } catch {
@@ -59,9 +63,9 @@ export async function synthesizeSpeech(
       continue;
     }
     try {
-      const audio = await attemptWithRetry(providerId, text, voice);
-      if (!audio || audio.length === 0) throw new Error('empty audio buffer');
-      return { audio, provider: providerId };
+      const result = await attemptWithRetry(providerId, text, voice);
+      if (!result.audio || result.audio.length === 0) throw new Error('empty audio buffer');
+      return { ...result, provider: providerId };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       failures.push(`${providerId}: ${message}`);

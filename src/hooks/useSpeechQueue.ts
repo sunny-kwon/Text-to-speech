@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { chunkText } from '@/lib/text/chunk';
-import type { TtsProviderId } from '@/lib/tts/types';
+import { wordIndexAtCharOffset } from '@/lib/text/tokenize';
+import type { TtsProviderId, WordTiming } from '@/lib/tts/types';
 
 export type Engine = TtsProviderId | 'browser';
 export type QueueStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'error' | 'done';
@@ -13,6 +14,11 @@ export interface SpeechQueueState {
   currentChunk: number;
   totalChunks: number;
   errorMessage: string | null;
+  /** Text of the chunk currently loaded/playing, for the transcript view. */
+  currentChunkText: string;
+  /** Word-token index (see lib/text/tokenize.ts) currently being spoken,
+   * or null when no timing data is available for this tier/chunk. */
+  activeWordIndex: number | null;
 }
 
 const CHUNK_TARGET_CHARS = 600;
@@ -24,7 +30,23 @@ const initialState: SpeechQueueState = {
   currentChunk: 0,
   totalChunks: 0,
   errorMessage: null,
+  currentChunkText: '',
+  activeWordIndex: null,
 };
+
+/** Decodes the compact base64 [startSec, endSec] pairs sent in the
+ * X-TTS-Word-Boundaries header. Uses TextDecoder (not a plain string
+ * built from atob's byte-per-char output) so multi-byte UTF-8 voice
+ * text in the surrounding JSON doesn't get mangled. */
+function decodeWordBoundaries(header: string): WordTiming[] {
+  try {
+    const bytes = Uint8Array.from(atob(header), (c) => c.charCodeAt(0));
+    const pairs = JSON.parse(new TextDecoder().decode(bytes)) as [number, number][];
+    return pairs.map(([startSec, endSec]) => ({ startSec, endSec }));
+  } catch {
+    return [];
+  }
+}
 
 export function useSpeechQueue() {
   const [state, setState] = useState<SpeechQueueState>(initialState);
@@ -37,6 +59,7 @@ export function useSpeechQueue() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const chunksRef = useRef<string[]>([]);
   const blobsRef = useRef<(Blob | null)[]>([]);
+  const boundariesRef = useRef<(WordTiming[] | null)[]>([]);
   const objectUrlsRef = useRef<string[]>([]);
   const forcedProviderRef = useRef<TtsProviderId | undefined>(undefined);
   const voiceIdRef = useRef('en-us-aria');
@@ -58,6 +81,29 @@ export function useSpeechQueue() {
       audio.removeEventListener('play', onPlay);
       audio.removeEventListener('pause', onPause);
     };
+  }, []);
+
+  // Drives word-highlight-as-you-read for the edge-tts tier (the only one
+  // with real timing data): on each playback tick, finds the last word
+  // whose start time has passed and marks it active.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onTimeUpdate = () => {
+      setState((s) => {
+        const boundaries = boundariesRef.current[s.currentChunk];
+        if (!boundaries || !boundaries.length) return s;
+        const t = audio.currentTime;
+        let idx = -1;
+        for (let i = 0; i < boundaries.length; i++) {
+          if (boundaries[i].startSec > t) break;
+          idx = i;
+        }
+        return idx === s.activeWordIndex ? s : { ...s, activeWordIndex: idx };
+      });
+    };
+    audio.addEventListener('timeupdate', onTimeUpdate);
+    return () => audio.removeEventListener('timeupdate', onTimeUpdate);
   }, []);
 
   // Unmount cleanup only ever touches refs, so it's the sole thing kept
@@ -95,6 +141,10 @@ export function useSpeechQueue() {
 
     const provider = response.headers.get('X-TTS-Provider') as TtsProviderId | null;
     if (provider) forcedProviderRef.current = provider;
+
+    const boundaryHeader = response.headers.get('X-TTS-Word-Boundaries');
+    boundariesRef.current[index] = boundaryHeader ? decodeWordBoundaries(boundaryHeader) : [];
+
     return response.blob();
   }
 
@@ -107,19 +157,34 @@ export function useSpeechQueue() {
     const remainingText = chunksRef.current.slice(fromIndex).join(' ');
     const utterance = new SpeechSynthesisUtterance(remainingText);
     utterance.rate = rateRef.current;
-    utterance.onend = () => setState((s) => ({ ...s, status: 'done' }));
+    // Word-highlighting in this fallback tier depends on the browser
+    // actually firing word boundaries (reliable in Chrome, inconsistent
+    // elsewhere) — where it doesn't fire, activeWordIndex just stays
+    // null and the transcript renders without a highlight.
+    utterance.onboundary = (event) => {
+      if (event.name && event.name !== 'word') return;
+      const idx = wordIndexAtCharOffset(remainingText, event.charIndex);
+      setState((s) => (s.activeWordIndex === idx ? s : { ...s, activeWordIndex: idx }));
+    };
+    utterance.onend = () => setState((s) => ({ ...s, status: 'done', activeWordIndex: null }));
     utterance.onerror = () =>
       setState((s) => ({ ...s, status: 'error', errorMessage: 'Browser speech playback failed.' }));
 
     window.speechSynthesis.cancel();
-    setState((s) => ({ ...s, engine: 'browser', status: 'playing' }));
+    setState((s) => ({
+      ...s,
+      engine: 'browser',
+      status: 'playing',
+      currentChunkText: remainingText,
+      activeWordIndex: null,
+    }));
     window.speechSynthesis.speak(utterance);
   }
 
   async function playChunk(index: number) {
     if (stopRequestedRef.current) return;
     if (index >= chunksRef.current.length) {
-      setState((s) => ({ ...s, status: 'done' }));
+      setState((s) => ({ ...s, status: 'done', activeWordIndex: null }));
       return;
     }
 
@@ -154,7 +219,13 @@ export function useSpeechQueue() {
       if (!stopRequestedRef.current) void playChunk(index + 1);
     };
 
-    setState((s) => ({ ...s, status: 'playing', engine: forcedProviderRef.current ?? s.engine ?? 'edge-tts' }));
+    setState((s) => ({
+      ...s,
+      status: 'playing',
+      engine: forcedProviderRef.current ?? s.engine ?? 'edge-tts',
+      currentChunkText: chunksRef.current[index] ?? '',
+      activeWordIndex: null,
+    }));
 
     // Prefetch the next chunk while the current one plays, so playback
     // doesn't stall waiting on the network between chunks.
@@ -186,6 +257,7 @@ export function useSpeechQueue() {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrlsRef.current = [];
     blobsRef.current = [];
+    boundariesRef.current = [];
 
     const chunks = chunkText(text, CHUNK_TARGET_CHARS);
     chunksRef.current = chunks;
@@ -195,7 +267,15 @@ export function useSpeechQueue() {
       return;
     }
 
-    setState({ status: 'loading', engine: null, currentChunk: 0, totalChunks: chunks.length, errorMessage: null });
+    setState({
+      status: 'loading',
+      engine: null,
+      currentChunk: 0,
+      totalChunks: chunks.length,
+      errorMessage: null,
+      currentChunkText: '',
+      activeWordIndex: null,
+    });
     void playChunk(0);
   }
 
@@ -203,7 +283,7 @@ export function useSpeechQueue() {
     stopRequestedRef.current = true;
     audioRef.current?.pause();
     if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
-    setState((s) => ({ ...s, status: 'idle' }));
+    setState((s) => ({ ...s, status: 'idle', activeWordIndex: null }));
   }
 
   function pause() {

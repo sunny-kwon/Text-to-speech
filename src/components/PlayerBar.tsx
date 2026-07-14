@@ -3,6 +3,7 @@
 import type { RefObject } from 'react';
 import type { SpeechQueueState } from '@/hooks/useSpeechQueue';
 import { EngineBadge } from './EngineBadge';
+import { TranscriptView } from './TranscriptView';
 
 interface Props {
   state: SpeechQueueState;
@@ -107,6 +108,8 @@ export function PlayerBar({
         controls
         className={!isBrowserEngine && (isActive || isBusy) ? 'w-full' : 'hidden'}
       />
+
+      <TranscriptView text={state.currentChunkText} activeWordIndex={state.activeWordIndex} />
 
       {state.status === 'error' && state.errorMessage && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">

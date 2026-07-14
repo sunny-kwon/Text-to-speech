@@ -16,6 +16,13 @@ An **optional** "clean up text with AI" toggle fixes PDF-extraction artifacts (b
 
 PDF text extraction runs entirely **client-side** (pdf.js) — files are never uploaded to a server.
 
+## Word-highlight-as-you-read
+
+`edge-tts` exposes per-word timing metadata from the underlying Azure service, which the app uses to highlight the word currently being spoken in a live transcript view. Word boundaries are sent from `/api/tts` as a compact, size-capped header alongside the audio (never inline in a JSON body, so a missing/oversized boundary payload can never break audio delivery), decoded client-side, and matched to playback time via the `<audio>` element's `timeupdate` event. Availability by tier:
+- **edge-tts**: full support (real timing data).
+- **google-tts**: no timing metadata exists for this endpoint — transcript shows with no highlight.
+- **Browser fallback**: uses `SpeechSynthesisUtterance.onboundary`, which Chrome supports reliably but other browsers implement inconsistently — highlight may not appear there, transcript still does.
+
 ## Environment variables
 
 Every variable is optional. See [`.env.example`](./.env.example). With none of them set, the app runs at full capability except:
@@ -61,17 +68,22 @@ src/
     api/tts/route.ts      # POST text -> MP3, runs the provider fallback chain
     api/clean/route.ts    # POST text -> AI-cleaned text (or passthrough)
     page.tsx               # renders <TtsApp />
-  components/              # UI: text input, voice/speed controls, player bar
+  components/              # UI: text input, voice/speed controls, player bar,
+                            # transcript/highlight view
   hooks/useSpeechQueue.ts   # client-side chunk queue, prefetching, provider
-                            # tracking, and the browser-voice last resort
+                            # tracking, word-highlight sync, and the
+                            # browser-voice last resort
   lib/
     tts/
       orchestrator.ts       # tier 1 -> tier 2 cascade + circuit breaker
-      providers/             # edge-tts / google-tts wrappers
+      providers/             # edge-tts (+ word timings) / google-tts wrappers
       circuitBreaker.ts, voices.ts, types.ts
     text/
       chunk.ts               # sentence-aware chunker (shared client+server)
       clean.ts                # Groq -> Gemini -> passthrough
+      tokenize.ts             # word-index tokenizer shared by the
+                              # highlighter and the browser-fallback boundary
+                              # mapping
     pdf/extract.ts           # client-side PDF text extraction (pdf.js)
     kv.ts, rateLimit.ts       # Upstash-backed, with in-memory fallback
 ```
