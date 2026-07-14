@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { TextSourcePanel } from './TextSourcePanel';
 import { VoiceSpeedControls } from './VoiceSpeedControls';
 import { PlayerBar } from './PlayerBar';
@@ -11,6 +11,17 @@ import { DEFAULT_VOICE_ID } from '@/lib/tts/voices';
 // Larger than the TTS chunk size: the cleanup LLM needs enough
 // surrounding context to fix line-wraps/hyphenation sensibly.
 const CLEAN_BATCH_CHARS = 4000;
+
+// Bumped if the persisted shape ever changes incompatibly.
+const STORAGE_KEY = 'tts-app-state-v1';
+const PERSIST_DEBOUNCE_MS = 400;
+
+interface PersistedState {
+  text: string;
+  voiceId: string;
+  rate: number;
+  cleanupEnabled: boolean;
+}
 
 async function cleanupText(text: string): Promise<string> {
   const batches = chunkText(text, CLEAN_BATCH_CHARS);
@@ -47,6 +58,51 @@ export function TtsApp() {
   const [isDownloading, setIsDownloading] = useState(false);
 
   const { state, speak, stop, pause, resume, setRate, download, audioElRef } = useSpeechQueue();
+
+  // Restoring localStorage must happen after mount (not in a lazy
+  // useState initializer), since this component is server-rendered
+  // first and `window` isn't available there — doing it in an effect
+  // avoids a hydration mismatch at the cost of a brief flash from
+  // empty to restored content, the standard tradeoff for this pattern.
+  // This is a one-time sync from an external store on mount (the
+  // sanctioned use of setState-in-effect), not a derived-state update —
+  // it just happens to touch four independent, otherwise-unrelated
+  // pieces of UI state at once, which is what trips the lint rule.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const restored = JSON.parse(raw) as Partial<PersistedState>;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (typeof restored.text === 'string') setText(restored.text);
+      if (typeof restored.voiceId === 'string') setVoiceId(restored.voiceId);
+      if (typeof restored.cleanupEnabled === 'boolean') setCleanupEnabled(restored.cleanupEnabled);
+      if (typeof restored.rate === 'number') {
+        setRateState(restored.rate);
+        setRate(restored.rate);
+      }
+    } catch {
+      // Corrupted or unavailable (private browsing) storage — just start fresh.
+    }
+    // Intentionally runs once on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced so pasting/typing a large document doesn't serialize the
+  // full text to localStorage on every keystroke.
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      try {
+        const payload: PersistedState = { text, voiceId, rate, cleanupEnabled };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch {
+        // Storage full or unavailable — losing persistence is non-fatal.
+      }
+    }, PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(persistTimerRef.current);
+  }, [text, voiceId, rate, cleanupEnabled]);
 
   const handleGenerate = useCallback(async () => {
     if (!text.trim()) return;

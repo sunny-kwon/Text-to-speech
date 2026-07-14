@@ -23,6 +23,12 @@ PDF text extraction runs entirely **client-side** (pdf.js) — files are never u
 - **google-tts**: no timing metadata exists for this endpoint — transcript shows with no highlight.
 - **Browser fallback**: uses `SpeechSynthesisUtterance.onboundary`, which Chrome supports reliably but other browsers implement inconsistently — highlight may not appear there, transcript still does.
 
+## Other UX features
+
+- **Remembers your place** — text, voice, speed, and the AI-cleanup toggle persist to `localStorage` (debounced, so pasting a large document doesn't hammer it), restored on your next visit.
+- **Lock-screen / background controls** — wired to the Media Session API, so play/pause/stop/next-segment/previous-segment work from the OS media UI and playback continues in a backgrounded tab. Falls back gracefully (no-op) on browsers without support.
+- **Voice preview** — a 🔊 button next to the voice picker plays a short sample before you commit to generating the whole document.
+
 ## Environment variables
 
 Every variable is optional. See [`.env.example`](./.env.example). With none of them set, the app runs at full capability except:

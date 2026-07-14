@@ -67,6 +67,18 @@ export function useSpeechQueue() {
   const stopRequestedRef = useRef(false);
   const browserModeRef = useRef(false);
 
+  // "Latest" ref: pause/resume/stop/playChunk are plain functions
+  // redefined every render (see note below), so the Media Session action
+  // handlers — registered exactly once — call through this ref instead
+  // of closing over stale versions from the render that registered them.
+  // Updated in a deps-less effect (runs after every render) rather than
+  // during render itself, per React's rule against mutating refs while
+  // rendering.
+  const latestRef = useRef({ pause, resume, stop, playChunk, currentChunk: state.currentChunk });
+  useEffect(() => {
+    latestRef.current = { pause, resume, stop, playChunk, currentChunk: state.currentChunk };
+  });
+
   // Keeps `state.status` in sync when the user drives playback directly
   // via the native <audio> controls (e.g. clicking its own pause button)
   // instead of through our pause()/resume() functions.
@@ -117,6 +129,52 @@ export function useSpeechQueue() {
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
+
+  // Lock-screen / notification / background-tab media controls. Handlers
+  // are registered once and call through latestRef so they always reach
+  // current behavior; nulled out on unmount so a stale session doesn't
+  // linger. next/previous track only make sense for the discrete chunks
+  // of server-generated audio — the browser-voice fallback reads the
+  // rest of the document as a single utterance with no chunk boundaries.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const session = navigator.mediaSession;
+    session.setActionHandler('play', () => latestRef.current.resume());
+    session.setActionHandler('pause', () => latestRef.current.pause());
+    session.setActionHandler('stop', () => latestRef.current.stop());
+    session.setActionHandler('nexttrack', () => {
+      if (browserModeRef.current) return;
+      stopRequestedRef.current = false;
+      void latestRef.current.playChunk(latestRef.current.currentChunk + 1);
+    });
+    session.setActionHandler('previoustrack', () => {
+      if (browserModeRef.current) return;
+      stopRequestedRef.current = false;
+      void latestRef.current.playChunk(Math.max(0, latestRef.current.currentChunk - 1));
+    });
+    return () => {
+      session.setActionHandler('play', null);
+      session.setActionHandler('pause', null);
+      session.setActionHandler('stop', null);
+      session.setActionHandler('nexttrack', null);
+      session.setActionHandler('previoustrack', null);
+    };
+  }, []);
+
+  // Keeps the OS media UI (lock screen, notification shade) in sync with
+  // actual playback state and shows a snippet of the current chunk as
+  // the title, so background/locked playback is identifiable and
+  // controllable without switching back to the tab.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState =
+      state.status === 'playing' ? 'playing' : state.status === 'paused' ? 'paused' : 'none';
+    if (typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = state.currentChunkText
+        ? new MediaMetadata({ title: state.currentChunkText.slice(0, 100), artist: 'Text to Speech' })
+        : null;
+    }
+  }, [state.status, state.currentChunkText]);
 
   // The functions below are intentionally plain (not useCallback): they
   // only ever run from user-triggered events (button clicks, audio
@@ -305,14 +363,24 @@ export function useSpeechQueue() {
   }
 
   /** Downloads require every chunk to be server-generated audio, so this
-   * is unavailable while in the browser-voice fallback mode. */
+   * is unavailable while in the browser-voice fallback mode. Fetches
+   * missing chunks in small concurrent batches rather than strictly
+   * sequentially — real speedup for long documents, while a modest
+   * concurrency cap (rather than firing all requests at once) keeps this
+   * a reasonable citizen of the shared, unofficial free TTS endpoints. */
   async function download(): Promise<Blob | null> {
     if (browserModeRef.current || !chunksRef.current.length) return null;
-    for (let i = 0; i < chunksRef.current.length; i++) {
-      if (!blobsRef.current[i]) {
-        blobsRef.current[i] = await fetchChunkAudio(i);
-      }
+
+    const DOWNLOAD_CONCURRENCY = 3;
+    const missing = chunksRef.current.map((_, i) => i).filter((i) => !blobsRef.current[i]);
+    for (let start = 0; start < missing.length; start += DOWNLOAD_CONCURRENCY) {
+      const batch = missing.slice(start, start + DOWNLOAD_CONCURRENCY);
+      const blobs = await Promise.all(batch.map((i) => fetchChunkAudio(i)));
+      batch.forEach((i, j) => {
+        blobsRef.current[i] = blobs[j];
+      });
     }
+
     return new Blob(blobsRef.current as Blob[], { type: 'audio/mpeg' });
   }
 
