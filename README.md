@@ -29,6 +29,16 @@ PDF text extraction runs entirely **client-side** (pdf.js) — files are never u
 - **Lock-screen / background controls** — wired to the Media Session API, so play/pause/stop/next-segment/previous-segment work from the OS media UI and playback continues in a backgrounded tab. Falls back gracefully (no-op) on browsers without support.
 - **Voice preview** — a 🔊 button next to the voice picker plays a short sample before you commit to generating the whole document.
 
+## Optional access gate
+
+Setting `SITE_ACCESS_CODE` puts the whole app (page and API routes) behind a single shared password — visiting any page redirects to `/enter` until the correct code is submitted, which sets an HTTP-only cookie for 30 days. This is meant to keep casual/opportunistic public traffic off a URL you've shared with a specific group, not to be real per-user authentication — there's one code, shared by everyone.
+
+- The code-check endpoint (`/api/access`) is rate-limited (10 attempts / 5 min per IP), so even a common/guessable word is impractical to brute-force.
+- The cookie stores an HMAC of the code, not the code itself — inspecting it in devtools doesn't reveal the password.
+- `/api/tts` and `/api/clean` re-check the cookie themselves in addition to the proxy-level gate (defense in depth — see [`src/lib/access.ts`](./src/lib/access.ts)).
+- Leave it unset for no gate at all (the default) — anyone with the URL can use the app, same as before this existed.
+- **Never commit the real value.** Set it only in your host's environment variable dashboard.
+
 ## Environment variables
 
 Every variable is optional. See [`.env.example`](./.env.example). With none of them set, the app runs at full capability except:
@@ -40,6 +50,7 @@ Every variable is optional. See [`.env.example`](./.env.example). With none of t
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Shared circuit breaker + per-IP rate limiting | [upstash.com](https://upstash.com) — 500K commands/mo |
 | `GROQ_API_KEY` (+ optional `GROQ_MODEL`) | Primary AI text cleanup | [console.groq.com](https://console.groq.com) — no credit card |
 | `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`) | Secondary AI text cleanup | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| `SITE_ACCESS_CODE` | Optional shared-password gate for the whole app | n/a — pick any value yourself |
 
 ## Local development
 
@@ -73,9 +84,13 @@ No database, no auth, and no persistent storage are required — the app is full
 
 ```
 src/
+  proxy.ts                  # optional access-code gate, runs before every route
   app/
     api/tts/route.ts      # POST text -> MP3, runs the provider fallback chain
     api/clean/route.ts    # POST text -> AI-cleaned text (or passthrough)
+    api/access/route.ts   # POST code -> sets the access-gate cookie
+    enter/                 # the /enter unlock page (only reachable when the
+                            # gate is on and the cookie is missing/invalid)
     page.tsx               # renders <TtsApp />
   components/              # UI: text input, voice/speed controls, player bar,
                             # transcript/highlight view
@@ -83,6 +98,8 @@ src/
                             # tracking, word-highlight sync, and the
                             # browser-voice last resort
   lib/
+    access.ts               # SITE_ACCESS_CODE gate: cookie issuance/checking,
+                            # shared by proxy.ts and the two API routes
     tts/
       orchestrator.ts       # tier 1 -> tier 2 cascade + circuit breaker
       providers/             # edge-tts (+ word timings) / google-tts wrappers

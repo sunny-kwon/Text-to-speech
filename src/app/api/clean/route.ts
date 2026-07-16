@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { cleanText } from '@/lib/text/clean';
 import { createRateLimiter, getClientIp } from '@/lib/rateLimit';
 import { parseJsonBody } from '@/lib/api/parseRequest';
+import { requireAccess } from '@/lib/access';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
@@ -18,6 +19,9 @@ const requestSchema = z.object({
 const cleanRateLimiter = createRateLimiter({ prefix: 'clean', max: 15, windowSeconds: 60 });
 
 export async function POST(request: NextRequest) {
+  const unauthorized = requireAccess(request);
+  if (unauthorized) return unauthorized;
+
   const parsed = await parseJsonBody(request, requestSchema);
   if (!parsed.ok) return parsed.response;
 

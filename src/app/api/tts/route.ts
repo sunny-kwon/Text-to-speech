@@ -4,6 +4,7 @@ import { AllProvidersDownError, synthesizeSpeech } from '@/lib/tts/orchestrator'
 import { getVoiceProfile } from '@/lib/tts/voices';
 import { createRateLimiter, getClientIp } from '@/lib/rateLimit';
 import { parseJsonBody } from '@/lib/api/parseRequest';
+import { requireAccess } from '@/lib/access';
 import type { CompactWordTiming, TtsProviderId, WordTiming } from '@/lib/tts/types';
 
 // Needs the Node.js runtime (edge-tts uses a WebSocket connection under
@@ -47,6 +48,9 @@ function encodeWordBoundaries(wordBoundaries: WordTiming[]): string | null {
 }
 
 export async function POST(request: NextRequest) {
+  const unauthorized = requireAccess(request);
+  if (unauthorized) return unauthorized;
+
   const parsed = await parseJsonBody(request, requestSchema);
   if (!parsed.ok) return parsed.response;
 
