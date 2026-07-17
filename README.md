@@ -2,9 +2,35 @@
 
 Paste text or drop a PDF, pick a voice, and listen. Free to run and free to host — no paid APIs, no accounts required for the core flow.
 
+## Use cases
+
+A personal/small-group reading tool, not a publishing or dubbing platform:
+
+- **Listen instead of read** — paste an article, a long email, a report; press play and walk away from the screen.
+- **PDF → audio** — drop a paper, ebook chapter, or any document with a text layer; extraction happens in your browser, nothing uploaded anywhere.
+- **Proofread your own writing** — hearing text read aloud catches awkward phrasing and typos your eyes skim past.
+- **Accessibility** — for anyone who reads more easily by ear than by eye: low vision, dyslexia, reading fatigue.
+- **Commute/workout listening** — generate, download the MP3, take it offline.
+- **Language exposure** — 10 voices across 8 languages; hear pronunciation, not just read it.
+- **Studying while moving** — lecture notes or a PDF chapter, converted into something you can listen to on a walk instead of at a desk.
+
+## Capabilities at a glance
+
+- **Input**: paste text, drop a PDF, or upload `.txt`; edit extracted text before generating.
+- **Speech**: 10 voices / 8 languages, adjustable speed (0.75x–2x), a preview button to hear a voice before committing.
+- **Playback**: native seek/volume/time controls, word-highlight-as-you-read, lock-screen/background controls (Media Session API), MP3 download.
+- **Persistence**: text, voice, speed, and the cleanup toggle are remembered across visits (`localStorage`).
+- **Resilience**: 3-tier provider fallback with a circuit breaker and per-IP rate limiting — see below.
+- **AI cleanup**: optional LLM pass that fixes PDF-extraction artifacts — off by default, see below.
+- **Access control**: optional shared-password gate for the whole app (`SITE_ACCESS_CODE`) — see below.
+- **Cost**: $0 to run. No required paid services, no database. Runs at full capability with zero environment variables set — Redis and the AI keys are pure upgrades, never requirements.
+- **Reliability**: 13 unit tests and CI (typecheck/lint/test/build) on every push — see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
+
 ## How it stays free and resilient
 
-Speech is generated through a **3-tier fallback chain**, so one provider going down doesn't take the app down:
+This app uses **two separate AI systems**, in very different states of "connected":
+
+**1. Text-to-speech (the core feature) — always on, no configuration needed.** This is neural voice synthesis — an AI model, but not a chatbot/LLM — generated through a **3-tier fallback chain**, so one provider going down doesn't take the app down:
 
 1. **`edge-tts`** — Microsoft Edge's neural voices (unofficial, free, no API key). High quality; the default.
 2. **`google-tts`** — Google Translate's TTS endpoint (unofficial, free, no API key). Different vendor/origin than tier 1, so a Microsoft-side outage doesn't affect it too.
@@ -12,7 +38,9 @@ Speech is generated through a **3-tier fallback chain**, so one provider going d
 
 A short-lived "circuit breaker" flag (shared via Upstash Redis when configured, otherwise scoped to a single warm serverless instance) means once a provider fails, every other concurrent request skips straight past it instead of separately waiting out a timeout — and a document keeps using whichever provider handled its first chunk (first-write-wins, immune to response reordering from concurrent prefetch/download requests), so the voice doesn't change mid-playback. Only a genuine "both providers are down" response triggers the permanent drop to the browser voice — a transient blip like a rate limit doesn't silently and irreversibly downgrade the rest of a document's playback.
 
-An **optional** "clean up text with AI" toggle fixes PDF-extraction artifacts (broken line wraps, hyphenation, stray headers/footers) before narration, via its own free-tier fallback chain: **Groq → Gemini → skip cleanup and use the original text**. This never blocks speech generation — if both are unset or fail, the app just narrates the original extracted text.
+**2. AI text cleanup — the one actual LLM integration, off by default.** An **optional** "clean up text with AI" toggle asks a language model to fix PDF-extraction artifacts (broken line wraps, hyphenation, stray headers/footers) before narration — never summarizing or changing wording — via its own free-tier fallback chain: **Groq (Llama models) → Gemini → skip cleanup and use the original text**. This never blocks speech generation.
+
+Until `GROQ_API_KEY` and/or `GEMINI_API_KEY` are set (see [Environment variables](#environment-variables)), checking this box is a no-op: `/api/clean` passes text through byte-for-byte unchanged (`cleanedBy: null`) — there's no LLM behind it yet, just the toggle and the wiring. Add either key to activate it.
 
 PDF text extraction runs entirely **client-side** (pdf.js) — files are never uploaded to a server.
 
